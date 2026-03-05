@@ -72,29 +72,35 @@ func (s *Server) Start() {
 	})
 
 	http.HandleFunc("/devices", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-
-		var body struct {
-			DeviceID string `json:"device_id"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			http.Error(w, "invalid body", http.StatusBadRequest)
-			return
-		}
-
-		if body.DeviceID == "" {
-			http.Error(w, "device_id required", http.StatusBadRequest)
-			return
-		}
-
-		// register on discovery
-		s.sessionDiscovery.RegisterDevice(body.DeviceID)
-
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+
+		if r.Method == http.MethodGet {
+			// List all discovered devices
+			devices := s.sessionDiscovery.GetDiscoveredDevices()
+			me := &discovery.DiscoveredDevice{DeviceID: s.deviceID + " (Me)"}
+			json.NewEncoder(w).Encode(append([]*discovery.DiscoveredDevice{me}, devices...))
+			return
+		}
+
+		if r.Method == http.MethodPost {
+			// Register a new device
+			var body struct {
+				DeviceID string `json:"device_id"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				http.Error(w, "invalid body", http.StatusBadRequest)
+				return
+			}
+			if body.DeviceID == "" {
+				http.Error(w, "device_id required", http.StatusBadRequest)
+				return
+			}
+			s.sessionDiscovery.RegisterDevice(body.DeviceID)
+			json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+			return
+		}
+
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 	})
 
 	http.HandleFunc("/ws", websocket.ServeWS)
