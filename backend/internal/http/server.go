@@ -23,6 +23,7 @@ type Server struct {
 	deviceID         string
 	sessionDiscovery *discovery.SessionDiscovery
 	port             int
+	hub              *websocket.Hub
 }
 
 func NewServer(db *sql.DB, deviceID string, sessionDiscovery *discovery.SessionDiscovery, port int) *Server {
@@ -31,12 +32,30 @@ func NewServer(db *sql.DB, deviceID string, sessionDiscovery *discovery.SessionD
 		deviceID:         deviceID,
 		sessionDiscovery: sessionDiscovery,
 		port:             port,
+		hub:              websocket.NewHub(),
 	}
 }
 
+func corsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS, PUT, DELETE")
+		w.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Content-Length, Accept-Encoding, Authorization")
+
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
+
 func (s *Server) Start() {
+	mux := http.NewServeMux()
+
 	// Unified Session Router
-	http.HandleFunc("/session/", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/session/", func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/session/create":
 			if r.Method == http.MethodPost {
@@ -80,7 +99,7 @@ func (s *Server) Start() {
 	})
 
 	// Devices Router
-	http.HandleFunc("/devices", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/devices", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -100,7 +119,7 @@ func (s *Server) Start() {
 	})
 
 	// Register device via HTTP (useful for browser clients)
-	http.HandleFunc("/register", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/register", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
@@ -127,14 +146,16 @@ func (s *Server) Start() {
 	})
 
 	// Returns this device's current ID (used by other devices to filter stale sessions)
-	http.HandleFunc("/whoami", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/whoami", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"deviceId": s.deviceID})
 	})
 
-	http.HandleFunc("/ws", websocket.ServeWS)
+	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+		websocket.ServeWS(s.hub, w, r)
+	})
 
 	log.Printf("🌍 0Xnet API active on port %d", s.port)
-	log.Fatal(http.ListenAndServe(fmt.Sprintf("0.0.0.0:%d", s.port), nil))
-
+	handler := corsMiddleware(mux)
+	log.Fatal(http.ListenAndServe(fmt.Sprintf("0.0.0.0:%d", s.port), handler))
 }

@@ -2,16 +2,16 @@ package db
 
 import (
 	"database/sql"
-
-	// "github.com/mattn/go-sqlite3"
+	"os"
 
 	_ "modernc.org/sqlite"
 )
 
 func Connect() (*sql.DB, error) {
-	// db, err := sql.Open("sqlite3", "../../data/oxnet.db")
-	db, err := sql.Open("sqlite", "data.db")
-
+	if err := os.MkdirAll("./data", 0755); err != nil {
+		return nil, err
+	}
+	db, err := sql.Open("sqlite", "./data/0xnet.db")
 	if err != nil {
 		return nil, err
 	}
@@ -30,14 +30,6 @@ func Connect() (*sql.DB, error) {
 		session_id TEXT,
 		device_id TEXT,
 		status TEXT
-	);
-
-	CREATE TABLE IF NOT EXISTS session_members (
-		id TEXT PRIMARY KEY,
-		session_id TEXT,
-		device_id TEXT,
-		device_name TEXT,
-		joined_at DATETIME
 	);`
 
 	_, err = db.Exec(schema)

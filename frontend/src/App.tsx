@@ -1,4 +1,4 @@
-import React, { Suspense, useEffect, useState } from 'react'
+import React, { Suspense, useEffect, useState, useMemo } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import Particles from './Particles'
 import BlurText from './BlurText'
@@ -35,25 +35,44 @@ class ErrorBoundary extends React.Component<{ children: React.ReactNode }, { has
 interface SessionData {
   id: string
   name: string
-  devices: number
-  status: 'active' | 'idle'
-  members?: number
+  hostId: string
+  createdAt: string
+  hostIp: string
+  hostPort: number
+  members: any[]
 }
 
 function MainContent({ onJoin, onCreateClicked }: { onJoin: (session: SessionData) => void, onCreateClicked: () => void }) {
-  const [sessions, setSessions] = useState<SessionData[]>([
-    { id: '01', name: 'Session 01', devices: 2, status: 'active', members: 3 },
-    { id: '02', name: 'Session 02', devices: 1, status: 'active', members: 1 },
-    { id: '03', name: 'Session 03', devices: 0, status: 'idle', members: 0 },
-    { id: '04', name: 'Session 04', devices: 5, status: 'active', members: 5 },
-  ])
+  const [sessions, setSessions] = useState<SessionData[]>([])
+  const [loading, setLoading] = useState(false)
+
+  const fetchSessions = async () => {
+    setLoading(true)
+    try {
+      const res = await fetch(`http://${window.location.hostname}:8080/session/list`)
+      if (res.ok) {
+        const data = await res.json()
+        setSessions(data || [])
+      }
+    } catch (err) {
+      console.error('Failed to fetch sessions:', err)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    fetchSessions()
+    const int = setInterval(fetchSessions, 3000)
+    return () => clearInterval(int)
+  }, [])
 
   return (
     <main className="main-content">
       <div className="intro-section">
         <div className="status-badge">
           <span className="status-dot">•</span>
-          OFFLINE READY
+          {loading ? 'SYNCING...' : 'ONLINE'}
         </div>
 
         <BlurText
@@ -75,26 +94,31 @@ function MainContent({ onJoin, onCreateClicked }: { onJoin: (session: SessionDat
       <section className="sessions-section">
         <div className="sessions-section-header">
           <h2 className="section-title">AVAILABLE SESSIONS</h2>
-          <button className="search-session-btn" onClick={() => console.log('Search sessions')}>
-            Search Session 🔍
+          <button className="search-session-btn" onClick={fetchSessions}>
+            {loading ? 'Refreshing...' : 'Refresh ↻'}
           </button>
         </div>
         <div className="sessions-container-scroll">
           <div className="sessions-grid">
             {sessions.map((session) => (
               <div key={session.id} className="session-card">
-                <div className="session-id">#{session.id}</div>
+                <div className="session-id">#{session.id.substring(0,6)}</div>
                 <div className="session-info">
                   <div className="session-header">
                     <span className="session-label">{session.name}</span>
                   </div>
                   <div className="session-status">
-                    <span>{session.devices} Connected</span>
+                    <span>{session.members?.length || 1} Connected</span>
                   </div>
                 </div>
-                <button className="join-btn" onClick={() => onJoin(session as SessionData)}>Join ▸</button>
+                <button className="join-btn" onClick={() => onJoin(session)}>Join ▸</button>
               </div>
             ))}
+            {sessions.length === 0 && !loading && (
+              <div style={{ color: '#9C90AA', gridColumn: '1 / -1', textAlign: 'center', padding: '2rem' }}>
+                No active sessions found on the network.
+              </div>
+            )}
           </div>
         </div>
       </section>
@@ -177,6 +201,12 @@ export default function App() {
   const [isCreating, setIsCreating] = useState(false)
   const [newSessionName, setNewSessionName] = useState('')
 
+  // Generate a stable peer ID for this browser tab
+  const peerId = useMemo(() => crypto.randomUUID(), [])
+
+  // WebSocket URL pointing to the Go backend on the same host
+  const wsUrl = `ws://${window.location.hostname}:8080/ws`
+
   const handleLogoClick = () => {
     setPanelOpen(false)
     setActiveSession(null)
@@ -186,17 +216,27 @@ export default function App() {
     }
   }
 
-  const handleCreateSession = () => {
+  const handleCreateSession = async () => {
     if (!newSessionName.trim()) return
-    const session: SessionData = {
-      id: Math.floor(Math.random() * 100).toString().padStart(2, '0'),
-      name: newSessionName,
-      devices: 1,
-      status: 'active'
+    try {
+      const res = await fetch(`http://${window.location.hostname}:8080/session/create`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ name: newSessionName })
+      })
+      if (res.ok) {
+        const session = await res.json()
+        setActiveSession(session)
+        setIsCreating(false)
+        setNewSessionName('')
+      } else {
+        console.error('Failed to create session:', await res.text())
+      }
+    } catch (err) {
+      console.error('Network error creating session:', err)
     }
-    setActiveSession(session)
-    setIsCreating(false)
-    setNewSessionName('')
   }
 
   return (
@@ -240,11 +280,9 @@ export default function App() {
                 id: activeSession.id,
                 name: activeSession.name,
                 activeSince: '00h 00m 00s',
-                members: [
-                  { id: '1', name: 'You', avatar: '', status: 'online', role: 'host', isMe: true },
-                  { id: '2', name: 'Alice', avatar: '', status: 'online', role: 'guest' },
-                ]
               }}
+              wsUrl={wsUrl}
+              peerId={peerId}
               onLeave={() => setActiveSession(null)}
             />
           )}

@@ -1,33 +1,69 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useRef, useMemo } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import ScrambledText from './ScrambledText'
 import PillNav from './PillNav'
+import useWebRTC from './useWebRTC'
 import './LiveSession.css'
-
-interface Participant {
-  id: string
-  name: string
-  avatar: string
-  status: 'online' | 'busy' | 'away'
-  role?: 'host' | 'guest'
-  isMe?: boolean
-}
 
 interface LiveSessionProps {
   sessionData: {
     id: string
     name: string
     activeSince: string
-    members: Participant[]
   }
+  wsUrl: string
+  peerId: string
   onLeave: () => void
 }
 
-const LiveSession: React.FC<LiveSessionProps> = ({ sessionData, onLeave }) => {
+// Component to render a video stream into a <video> element
+function VideoRenderer({ stream, muted = false }: { stream: MediaStream; muted?: boolean }) {
+  const videoRef = useRef<HTMLVideoElement>(null)
+
+  useEffect(() => {
+    if (videoRef.current && stream) {
+      videoRef.current.srcObject = stream
+    }
+  }, [stream])
+
+  return (
+    <video
+      ref={videoRef}
+      autoPlay
+      playsInline
+      muted={muted}
+      className="tile-video"
+    />
+  )
+}
+
+const LiveSession: React.FC<LiveSessionProps> = ({ sessionData, wsUrl, peerId, onLeave }) => {
   const [participantsOpen, setParticipantsOpen] = useState(false)
-  const [activeTab, setActiveTab] = useState('video')
-  const [isMuted, setIsMuted] = useState(false)
-  const [isVideoOn, setIsVideoOn] = useState(true)
+  const [elapsedTime, setElapsedTime] = useState('00h 00m 00s')
+
+  const {
+    localStream,
+    remoteStreams,
+    peers,
+    isMuted,
+    isVideoOn,
+    toggleAudio,
+    toggleVideo,
+    error
+  } = useWebRTC(wsUrl, sessionData.id, peerId)
+
+  // Elapsed time counter
+  useEffect(() => {
+    const start = Date.now()
+    const interval = setInterval(() => {
+      const diff = Date.now() - start
+      const h = String(Math.floor(diff / 3600000)).padStart(2, '0')
+      const m = String(Math.floor((diff % 3600000) / 60000)).padStart(2, '0')
+      const s = String(Math.floor((diff % 60000) / 1000)).padStart(2, '0')
+      setElapsedTime(`${h}h ${m}m ${s}s`)
+    }, 1000)
+    return () => clearInterval(interval)
+  }, [])
 
   const controlItems = [
     { id: 'video', label: isVideoOn ? 'Video' : 'Video Off', icon: isVideoOn ? '📹' : '🚫' },
@@ -36,84 +72,139 @@ const LiveSession: React.FC<LiveSessionProps> = ({ sessionData, onLeave }) => {
     { id: 'settings', label: 'Settings', icon: '⚙️' },
   ]
 
-  // Mock toggle functions
   const handleControlChange = (id: string) => {
-    if (id === 'video') setIsVideoOn(!isVideoOn)
-    if (id === 'audio') setIsMuted(!isMuted)
+    if (id === 'video') toggleVideo()
+    if (id === 'audio') toggleAudio()
   }
 
+  // Build the list of all tiles: self + remote peers
+  const remotePeerIds = Array.from(remoteStreams.keys())
+  const totalCount = 1 + remotePeerIds.length // self + remotes
+  const allParticipants = ['You', ...remotePeerIds]
+
   return (
-    <motion.div 
+    <motion.div
       className="live-session-overlay meet-theme"
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
     >
       <div className="meet-container">
+        {/* Error Banner */}
+        {error && (
+          <div className="webrtc-error-banner">
+            ⚠️ {error}
+          </div>
+        )}
+
         {/* Top Header */}
         <header className="meet-header">
           <div className="header-left">
-            <ScrambledText 
-              text={sessionData.name} 
-              className="meet-session-name" 
+            <ScrambledText
+              text={sessionData.name}
+              className="meet-session-name"
               duration={1000}
             />
             <span className="meet-session-id">0X-{sessionData.id}</span>
           </div>
-          
+
           <div className="header-right">
-             <motion.button 
+             <motion.button
                className={`meet-utility-btn ${participantsOpen ? 'active' : ''}`}
                onClick={() => setParticipantsOpen(!participantsOpen)}
                whileHover={{ scale: 1.1 }}
                whileTap={{ scale: 0.9 }}
                title="Participants"
              >
-               👥 <span>{sessionData.members.length}</span>
+               👥 <span>{totalCount}</span>
              </motion.button>
              <button className="meet-utility-btn" title="Chat">💬</button>
           </div>
         </header>
 
-        {/* Video Call Grid Area */}
+        {/* Video Grid */}
         <main className="meet-main">
-          <div className={`video-grid count-${sessionData.members.length}`}>
-            {sessionData.members.map((member, i) => (
-              <motion.div 
-                key={member.id} 
-                className="video-tile"
-                initial={{ opacity: 0, scale: 0.9 }}
-                animate={{ opacity: 1, scale: 1 }}
-                transition={{ delay: i * 0.1 }}
-                layout
-              >
+          <div className={`video-grid count-${Math.min(totalCount, 4)}`}>
+            {/* Self tile */}
+            <motion.div
+              className="video-tile"
+              initial={{ opacity: 0, scale: 0.9 }}
+              animate={{ opacity: 1, scale: 1 }}
+              transition={{ delay: 0 }}
+              layout
+            >
+              {localStream && isVideoOn ? (
+                <VideoRenderer stream={localStream} muted={true} />
+              ) : (
                 <div className="video-avatar">
-                   {member.avatar ? <img src={member.avatar} alt={member.name} /> : <div className="avatar-placeholder">{member.name[0]}</div>}
+                  <div className="avatar-placeholder">Y</div>
                 </div>
-                <div className="tile-label">
-                   {member.isMe ? 'You' : member.name}
-                </div>
-                {/* Simulated Audio Indicator */}
+              )}
+              <div className="tile-label">You</div>
+              {!isMuted && (
                 <div className="audio-indicator">
-                   <div className="audio-bars">
+                  <div className="audio-bars">
+                    {[1, 2, 3].map(barIdx => (
+                      <motion.div
+                        key={barIdx}
+                        className="bar"
+                        animate={{ height: [2, Math.random() * 8 + 4, 2] }}
+                        transition={{ repeat: Infinity, duration: 0.4 + Math.random() * 0.4 }}
+                      />
+                    ))}
+                  </div>
+                </div>
+              )}
+              {isMuted && (
+                <div className="muted-indicator">🔇</div>
+              )}
+            </motion.div>
+
+            {/* Remote peer tiles */}
+            {remotePeerIds.map((remotePeerId, i) => {
+              const stream = remoteStreams.get(remotePeerId)
+              return (
+                <motion.div
+                  key={remotePeerId}
+                  className="video-tile"
+                  initial={{ opacity: 0, scale: 0.9 }}
+                  animate={{ opacity: 1, scale: 1 }}
+                  transition={{ delay: (i + 1) * 0.1 }}
+                  layout
+                >
+                  {stream ? (
+                    <VideoRenderer stream={stream} />
+                  ) : (
+                    <div className="video-avatar">
+                      <div className="avatar-placeholder">
+                        {remotePeerId.charAt(0).toUpperCase()}
+                      </div>
+                    </div>
+                  )}
+                  <div className="tile-label">
+                    Peer {remotePeerId.substring(0, 6)}
+                  </div>
+                  <div className="audio-indicator">
+                    <div className="audio-bars">
                       {[1, 2, 3].map(barIdx => (
                         <motion.div
-                           key={barIdx}
-                           className="bar"
-                           animate={{ height: [2, Math.random() * 8 + 4, 2] }}
-                           transition={{ repeat: Infinity, duration: 0.4 + Math.random() * 0.4 }}
+                          key={barIdx}
+                          className="bar"
+                          animate={{ height: [2, Math.random() * 8 + 4, 2] }}
+                          transition={{ repeat: Infinity, duration: 0.4 + Math.random() * 0.4 }}
                         />
                       ))}
-                   </div>
-                </div>
-              </motion.div>
-            ))}
+                    </div>
+                  </div>
+                </motion.div>
+              )
+            })}
           </div>
 
-          {/* Floating Participants Sidebar (Overlay if screen is small) */}
+          {/* Participants Sidebar */}
           <AnimatePresence>
             {participantsOpen && (
-              <motion.aside 
+              <motion.aside
                 className="meet-participants-sidebar"
                 initial={{ x: 400, opacity: 0 }}
                 animate={{ x: 0, opacity: 1 }}
@@ -121,17 +212,24 @@ const LiveSession: React.FC<LiveSessionProps> = ({ sessionData, onLeave }) => {
                 transition={{ type: 'spring', damping: 20 }}
               >
                 <div className="sidebar-header">
-                  <h3>Participants</h3>
+                  <h3>Participants ({totalCount})</h3>
                   <button onClick={() => setParticipantsOpen(false)}>✕</button>
                 </div>
                 <div className="participants-list">
-                  {sessionData.members.map((member) => (
-                    <div key={member.id} className="participant-row">
-                      <div className="p-avatar">{member.name[0]}</div>
-                      <span className="p-name">{member.name} {member.isMe && '(You)'}</span>
-                      <div className="p-controls">
-                         🎙️ 📹
-                      </div>
+                  {/* Self */}
+                  <div className="participant-row">
+                    <div className="p-avatar">Y</div>
+                    <span className="p-name">You</span>
+                    <div className="p-controls">
+                      {isMuted ? '🔇' : '🎙️'} {isVideoOn ? '📹' : '🚫'}
+                    </div>
+                  </div>
+                  {/* Remote peers */}
+                  {remotePeerIds.map(rpId => (
+                    <div key={rpId} className="participant-row">
+                      <div className="p-avatar">{rpId.charAt(0).toUpperCase()}</div>
+                      <span className="p-name">Peer {rpId.substring(0, 6)}</span>
+                      <div className="p-controls">🎙️ 📹</div>
                     </div>
                   ))}
                 </div>
@@ -140,20 +238,20 @@ const LiveSession: React.FC<LiveSessionProps> = ({ sessionData, onLeave }) => {
           </AnimatePresence>
         </main>
 
-        {/* Floating Control Bar */}
+        {/* Control Bar */}
         <footer className="meet-footer">
            <div className="footer-left-info">
-              {sessionData.activeSince}
+              {elapsedTime}
            </div>
-           
+
            <div className="footer-center">
-              <PillNav 
-                items={controlItems} 
-                activeId={activeTab} 
-                onChange={handleControlChange} 
+              <PillNav
+                items={controlItems}
+                activeId={isVideoOn ? 'video' : (isMuted ? 'audio' : 'video')}
+                onChange={handleControlChange}
                 className="control-pills"
               />
-              <motion.button 
+              <motion.button
                 className="end-call-btn"
                 whileHover={{ scale: 1.1, backgroundColor: '#ea4335' }}
                 whileTap={{ scale: 0.9 }}

@@ -1,48 +1,75 @@
 package websocket
 
 import (
+	"encoding/json"
+	"log"
 	"net/http"
 
 	"github.com/gorilla/websocket"
 )
 
-type Client struct {
-	DeviceID string
-	Conn     *websocket.Conn
-	Session  string
-}
-
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool { return true },
 }
 
-func ServeWS(w http.ResponseWriter, r *http.Request) {
-	conn, _ := upgrader.Upgrade(w, r, nil)
+// signalingMessage is used to extract routing fields from incoming WS messages
+type signalingMessage struct {
+	Type         string `json:"type"`
+	TargetPeerID string `json:"targetPeerId"`
+}
 
-	var msg map[string]string
-	conn.ReadJSON(&msg)
+// ServeWS handles WebSocket connections for WebRTC signaling.
+// Expects query params: ?session=<sessionID>&peerId=<peerID>
+func ServeWS(hub *Hub, w http.ResponseWriter, r *http.Request) {
+	sessionID := r.URL.Query().Get("session")
+	peerID := r.URL.Query().Get("peerId")
 
-	// First message must be join-session
-	if msg["type"] != "join-session" {
-		conn.Close()
+	if sessionID == "" || peerID == "" {
+		http.Error(w, "session and peerId query params required", http.StatusBadRequest)
 		return
 	}
 
-	// Approval logic handled by HTTP / DB
-	// If approved → keep connection
-	for {
-		var incoming map[string]interface{}
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Printf("❌ [WS] Upgrade failed: %v", err)
+		return
+	}
 
-		err := conn.ReadJSON(&incoming)
+	// Register this peer in the session hub
+	client := hub.Join(sessionID, peerID, conn)
+
+	// Ensure cleanup on disconnect
+	defer hub.Leave(sessionID, peerID)
+
+	// Read loop — relay signaling messages
+	for {
+		_, rawMsg, err := conn.ReadMessage()
 		if err != nil {
+			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseNormalClosure) {
+				log.Printf("⚠️ [WS] Unexpected close from peer %s: %v", client.PeerID, err)
+			}
 			break
 		}
 
-		// process incoming data here
+		// Parse just the routing fields
+		var sig signalingMessage
+		if err := json.Unmarshal(rawMsg, &sig); err != nil {
+			log.Printf("⚠️ [WS] Invalid JSON from peer %s: %v", peerID, err)
+			continue
+		}
 
-		err = conn.WriteJSON(incoming)
-		if err != nil {
-			break
+		switch sig.Type {
+		case "rtc-offer", "rtc-answer", "ice-candidate":
+			// Relay to the specific target peer
+			if sig.TargetPeerID == "" {
+				log.Printf("⚠️ [WS] %s from peer %s missing targetPeerId", sig.Type, peerID)
+				continue
+			}
+			hub.RelayTo(sessionID, sig.TargetPeerID, json.RawMessage(rawMsg))
+
+		default:
+			// Broadcast any other message type to all peers in the session
+			hub.Broadcast(sessionID, peerID, json.RawMessage(rawMsg))
 		}
 	}
 }
