@@ -35,12 +35,8 @@ class ErrorBoundary extends React.Component<{ children: React.ReactNode }, { has
 interface SessionData {
   id: string
   name: string
-  hostId: string
-  createdAt: string
-  hostIp: string
-  hostPort: number
-  members: any[]
   hostId?: string
+  createdAt?: string
   hostIp?: string
   hostPort?: number
   members?: any[]
@@ -48,21 +44,25 @@ interface SessionData {
 
 function MainContent({ onJoin, onCreateClicked }: { onJoin: (session: SessionData) => void, onCreateClicked: () => void }) {
   const [sessions, setSessions] = useState<SessionData[]>([])
+  const [loading, setLoading] = useState(false)
+
+  const fetchSessions = async () => {
+    const backendPort = '8080'
+    setLoading(true)
+    try {
+      const response = await fetch(`http://${window.location.hostname}:${backendPort}/session/list`)
+      if (response.ok) {
+        const data = await response.json()
+        setSessions(Array.isArray(data) ? data : [])
+      }
+    } catch (err) {
+      console.error('Failed to fetch sessions', err)
+    } finally {
+      setLoading(false)
+    }
+  }
 
   useEffect(() => {
-    const backendPort = '8080'
-    const fetchSessions = async () => {
-      try {
-        const response = await fetch(`http://${window.location.hostname}:${backendPort}/session/list`)
-        if (response.ok) {
-          const data = await response.json()
-          setSessions(data || [])
-        }
-      } catch (err) {
-        console.error('Failed to fetch sessions', err)
-      }
-    }
-
     fetchSessions()
     const interval = setInterval(fetchSessions, 3000)
     return () => clearInterval(interval)
@@ -309,6 +309,8 @@ export default function App() {
           ) : (
             <LiveSession
               key="live-session"
+              wsUrl={wsUrl}
+              peerId={peerId}
               sessionData={{
                 id: activeSession.id,
                 name: activeSession.name,
@@ -322,7 +324,7 @@ export default function App() {
                     avatar: '',
                     status: 'online',
                     role: m.deviceName === 'Host' ? 'host' : 'guest',
-                    isMe: false // This will be calculated by LiveSession.tsx correctly if needed
+                    isMe: false
                   }))
                   : [
                     { id: '1', name: 'You', avatar: '', status: 'online', role: 'host', isMe: true }

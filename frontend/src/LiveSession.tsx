@@ -10,6 +10,9 @@ interface LiveSessionProps {
     id: string
     name: string
     activeSince: string
+    hostIp?: string
+    hostPort?: number
+    members?: any[]
   }
   wsUrl: string
   peerId: string
