@@ -1,75 +1,101 @@
 package websocket
 
 import (
-	"encoding/json"
 	"log"
 	"net/http"
 
 	"github.com/gorilla/websocket"
 )
 
+type Client struct {
+	DeviceID string // Can be username or peer ID
+	Conn     *websocket.Conn
+	Session  string
+}
+
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool { return true },
 }
 
-// signalingMessage is used to extract routing fields from incoming WS messages
-type signalingMessage struct {
-	Type         string `json:"type"`
-	TargetPeerID string `json:"targetPeerId"`
-}
-
-// ServeWS handles WebSocket connections for WebRTC signaling.
-// Expects query params: ?session=<sessionID>&peerId=<peerID>
-func ServeWS(hub *Hub, w http.ResponseWriter, r *http.Request) {
-	sessionID := r.URL.Query().Get("session")
-	peerID := r.URL.Query().Get("peerId")
-
-	if sessionID == "" || peerID == "" {
-		http.Error(w, "session and peerId query params required", http.StatusBadRequest)
-		return
-	}
-
+func ServeWS(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Printf("❌ [WS] Upgrade failed: %v", err)
+		log.Printf("WS Upgrade Error: %v", err)
+		return
+	}
+	defer conn.Close()
+
+	// 1. Authenticate / Identify on Join
+	var initialMsg map[string]string
+	if err := conn.ReadJSON(&initialMsg); err != nil {
+		log.Printf("WS Initial Read Error: %v", err)
 		return
 	}
 
-	// Register this peer in the session hub
-	client := hub.Join(sessionID, peerID, conn)
+	if initialMsg["type"] != "join-session" || initialMsg["sessionId"] == "" {
+		log.Println("WS Rejected: Invalid join-session message")
+		return
+	}
 
-	// Ensure cleanup on disconnect
-	defer hub.Leave(sessionID, peerID)
+	sessionID := initialMsg["sessionId"]
+	username := initialMsg["username"]
+	if username == "" {
+		username = "Anonymous"
+	}
 
-	// Read loop — relay signaling messages
+	client := &Client{
+		DeviceID: username,
+		Conn:     conn,
+		Session:  sessionID,
+	}
+
+	hub := GlobalManager.GetHub(sessionID)
+	hub.Register(client)
+	defer hub.Unregister(client)
+
+	log.Printf("WS Client Connected: %s to Session %s", username, sessionID)
+
+	// Notify others of new join (optional, good for status)
+	hub.Broadcast(map[string]interface{}{
+		"type":    "system",
+		"message": username + " joined the session",
+	})
+
+	// 2. Main Message Loop
 	for {
-		_, rawMsg, err := conn.ReadMessage()
+		var incoming map[string]interface{}
+		err := conn.ReadJSON(&incoming)
 		if err != nil {
-			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseNormalClosure) {
-				log.Printf("⚠️ [WS] Unexpected close from peer %s: %v", client.PeerID, err)
-			}
+			log.Printf("WS Read Error: %v", err)
 			break
 		}
 
-		// Parse just the routing fields
-		var sig signalingMessage
-		if err := json.Unmarshal(rawMsg, &sig); err != nil {
-			log.Printf("⚠️ [WS] Invalid JSON from peer %s: %v", peerID, err)
-			continue
-		}
+		msgType, _ := incoming["type"].(string)
 
-		switch sig.Type {
-		case "rtc-offer", "rtc-answer", "ice-candidate":
-			// Relay to the specific target peer
-			if sig.TargetPeerID == "" {
-				log.Printf("⚠️ [WS] %s from peer %s missing targetPeerId", sig.Type, peerID)
+		switch msgType {
+		case "chat":
+			hub.Broadcast(map[string]interface{}{
+				"type":      "chat",
+				"sender":    username,
+				"message":   incoming["message"],
+				"timestamp": incoming["timestamp"],
+			})
+
+		case "offer", "answer", "ice-candidate", "renegotiate":
+			// WebRTC Signaling: Relay only to the intended peer.
+			targetPeerID, _ := incoming["targetPeerId"].(string)
+			if targetPeerID == "" {
+				log.Printf("WS Signaling Missing targetPeerId | type=%s sender=%s", msgType, client.DeviceID)
 				continue
 			}
-			hub.RelayTo(sessionID, sig.TargetPeerID, json.RawMessage(rawMsg))
+
+			incoming["sender"] = client.DeviceID
+			if ok := hub.SendToDevice(targetPeerID, incoming); !ok {
+				log.Printf("WS Signaling Target Not Connected | type=%s sender=%s target=%s", msgType, client.DeviceID, targetPeerID)
+			}
 
 		default:
-			// Broadcast any other message type to all peers in the session
-			hub.Broadcast(sessionID, peerID, json.RawMessage(rawMsg))
+			log.Printf("WS Unknown Message Type: %s", msgType)
 		}
 	}
 }
